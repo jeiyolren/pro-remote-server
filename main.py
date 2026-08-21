@@ -1,83 +1,55 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import json
+from typing import List
 
 app = FastAPI()
 
-active_hosts = {}
-relay_pairs = {}
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        print(f"[+] May kumonekta! Total clients: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+        print(f"[-] Nag-disconnect ang isang client. Total clients: {len(self.active_connections)}")
+
+    async def broadcast(self, message, is_bytes: bool):
+        for connection in self.active_connections:
+            try:
+                if is_bytes:
+                    await connection.send_bytes(message)
+                else:
+                    await connection.send_text(message)
+            except Exception as e:
+                print(f"[-] Error sa pag-broadcast: {e}")
+
+manager = ConnectionManager()
+
+@app.get("/")
+def read_root():
+    return {"status": "Premote Cloud Server ay buhay at gising!"}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    my_role = None
-    my_id = None
-    
+    await manager.connect(websocket)
     try:
-        init_msg = await websocket.receive_text()
-        data = json.loads(init_msg)
-        action = data.get("action")
-        
-        if action == "register_host":
-            my_role = "host"
-            my_id = data.get("host_id")
-            # Ise-save na agad ang password sa server
-            my_password = data.get("password", "admin123")
-            active_hosts[my_id] = {"ws": websocket, "password": my_password}
+        while True:
+            # Saluhin ang mensahe mula sa C++ app o Web Viewer
+            message = await websocket.receive()
             
-            await websocket.send_text(json.dumps({"status": "REGISTERED"}))
-            
-            while True:
-                msg = await websocket.receive()
-                if websocket in relay_pairs:
-                    client_ws = relay_pairs[websocket]
-                    if "bytes" in msg:
-                        await client_ws.send_bytes(msg["bytes"])
-                    elif "text" in msg:
-                        await client_ws.send_text(msg["text"])
-                        
-        elif action == "connect_client":
-            my_role = "client"
-            target_id = data.get("target_id")
-            client_password = data.get("password")
-            
-            if target_id not in active_hosts:
-                await websocket.send_text(json.dumps({"status": "NOT_FOUND"}))
-                await websocket.close()
-                return
+            if "bytes" in message and message["bytes"] is not None:
+                # Binary frame galing sa C++ screen streamer
+                await manager.broadcast(message["bytes"], is_bytes=True)
+            elif "text" in message and message["text"] is not None:
+                # Text/Command galing sa web viewer (mouse move/click)
+                await manager.broadcast(message["text"], is_bytes=False)
                 
-            host_data = active_hosts[target_id]
-            
-            # Server na mismo ang magche-check ng password para walang crash!
-            if client_password != host_data["password"]:
-                await websocket.send_text(json.dumps({"status": "AUTH_FAIL"}))
-                await websocket.close()
-                return
-                
-            host_ws = host_data["ws"]
-            await websocket.send_text(json.dumps({"status": "AUTH_OK"}))
-            
-            # I-link sila at sabihan ang host na simulan ang video
-            relay_pairs[websocket] = host_ws
-            relay_pairs[host_ws] = websocket
-            await host_ws.send_text(json.dumps({"action": "start_stream"}))
-            
-            while True:
-                msg = await websocket.receive()
-                if host_ws in relay_pairs:
-                    if "bytes" in msg:
-                        await host_ws.send_bytes(msg["bytes"])
-                    elif "text" in msg:
-                        await host_ws.send_text(msg["text"])
-                        
     except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        if my_role == "host" and my_id in active_hosts:
-            del active_hosts[my_id]
-        if websocket in relay_pairs:
-            partner = relay_pairs[websocket]
-            if partner in relay_pairs:
-                del relay_pairs[partner]
-            del relay_pairs[websocket]
+        manager.disconnect(websocket)
+    except Exception as e:
+        manager.disconnect(websocket)
+        print(f"[-] WebSocket Error: {e}")
