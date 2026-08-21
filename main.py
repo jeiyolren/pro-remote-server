@@ -18,7 +18,6 @@ class ConnectionManager:
         print(f"[-] Nag-disconnect ang isang client. Total clients: {len(self.active_connections)}")
 
     async def broadcast_to_others(self, message, sender: WebSocket, is_bytes: bool):
-        # I-broadcast sa LAIBAN MALIBAN sa nagpadala (sender)
         for connection in self.active_connections:
             if connection != sender:
                 try:
@@ -42,11 +41,12 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             message = await websocket.receive()
             
-            # Ipasa lamang sa ibang clients (Browser o C++ app)
             if message.get("bytes"):
                 await manager.broadcast_to_others(message["bytes"], websocket, is_bytes=True)
             elif message.get("text"):
-                await manager.broadcast_to_others(message["text"], websocket, is_bytes=False)
+                txt = message["text"]
+                print(f"[Mouse/Command Nakuha]: {txt}")  # I-print sa Render logs
+                await manager.broadcast_to_others(txt, websocket, is_bytes=False)
                 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
