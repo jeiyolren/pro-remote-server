@@ -20,7 +20,10 @@ async def websocket_endpoint(websocket: WebSocket):
         if action == "register_host":
             my_role = "host"
             my_id = data.get("host_id")
-            active_hosts[my_id] = websocket
+            # Ise-save na agad ang password sa server
+            my_password = data.get("password", "admin123")
+            active_hosts[my_id] = {"ws": websocket, "password": my_password}
+            
             await websocket.send_text(json.dumps({"status": "REGISTERED"}))
             
             while True:
@@ -35,27 +38,28 @@ async def websocket_endpoint(websocket: WebSocket):
         elif action == "connect_client":
             my_role = "client"
             target_id = data.get("target_id")
-            password = data.get("password")
+            client_password = data.get("password")
             
             if target_id not in active_hosts:
                 await websocket.send_text(json.dumps({"status": "NOT_FOUND"}))
                 await websocket.close()
                 return
                 
-            host_ws = active_hosts[target_id]
+            host_data = active_hosts[target_id]
             
-            await host_ws.send_text(json.dumps({"action": "check_password", "password": password}))
-            auth_response = await host_ws.receive_text()
-            auth_data = json.loads(auth_response)
-            
-            if auth_data.get("status") != "AUTH_OK":
+            # Server na mismo ang magche-check ng password para walang crash!
+            if client_password != host_data["password"]:
                 await websocket.send_text(json.dumps({"status": "AUTH_FAIL"}))
                 await websocket.close()
                 return
                 
+            host_ws = host_data["ws"]
             await websocket.send_text(json.dumps({"status": "AUTH_OK"}))
+            
+            # I-link sila at sabihan ang host na simulan ang video
             relay_pairs[websocket] = host_ws
             relay_pairs[host_ws] = websocket
+            await host_ws.send_text(json.dumps({"action": "start_stream"}))
             
             while True:
                 msg = await websocket.receive()
