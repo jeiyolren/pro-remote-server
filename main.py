@@ -3,8 +3,8 @@ import json
 
 app = FastAPI()
 
-active_hosts = {}  # host_id -> host_websocket
-relay_pairs = {}   # websocket -> partner_websocket
+active_hosts = {}
+relay_pairs = {}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -22,7 +22,6 @@ async def websocket_endpoint(websocket: WebSocket):
             my_id = data.get("host_id")
             active_hosts[my_id] = websocket
             await websocket.send_text(json.dumps({"status": "REGISTERED"}))
-            print(f"[*] Host registered: {my_id}")
             
             while True:
                 msg = await websocket.receive()
@@ -45,7 +44,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 
             host_ws = active_hosts[target_id]
             
-            # Password check sa pamamagitan ng host
             await host_ws.send_text(json.dumps({"action": "check_password", "password": password}))
             auth_response = await host_ws.receive_text()
             auth_data = json.loads(auth_response)
@@ -55,11 +53,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.close()
                 return
                 
-            # Tagumpay ang koneksyon! I-link na sila sa relay pairs
             await websocket.send_text(json.dumps({"status": "AUTH_OK"}))
             relay_pairs[websocket] = host_ws
             relay_pairs[host_ws] = websocket
-            print(f"[*] Client relayed to Host: {target_id}")
             
             while True:
                 msg = await websocket.receive()
@@ -70,9 +66,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         await host_ws.send_text(msg["text"])
                         
     except WebSocketDisconnect:
-        print(f"[-] Disconnected ({my_role})")
-    except Exception as e:
-        print(f"[!] Error: {e}")
+        pass
+    except Exception:
+        pass
     finally:
         if my_role == "host" and my_id in active_hosts:
             del active_hosts[my_id]
