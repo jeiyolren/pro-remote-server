@@ -1,28 +1,26 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from typing import List, Dict
 
 app = FastAPI()
 
-# Palitan mo na lang ang password na ito ng gusto mo
 SECRET_PASSWORD = "password123"
 
 class ConnectionManager:
     def __init__(self):
-        # I-track kung ang isang connection ay authenticated na ba (True/False)
         self.active_connections: Dict[WebSocket, bool] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections[websocket] = False  # Hindi pa authenticated sa simula
-        print(f"[+] May kumonekta (Naghihintay ng Password)... Total clients: {len(self.active_connections)}")
+        self.active_connections[websocket] = False
+        print(f"[+] May kumonekta... Total clients: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             del self.active_connections[websocket]
-        print(f"[-] Nag-disconnect ang isang client. Total clients: {len(self.active_connections)}")
+        print(f"[-] Nag-disconnect ang client. Total clients: {len(self.active_connections)}")
 
     async def broadcast_to_others(self, message, sender: WebSocket, is_bytes: bool):
-        # I-broadcast lamang sa mga authenticated na clients
         for connection, is_auth in self.active_connections.items():
             if connection != sender and is_auth:
                 try:
@@ -35,9 +33,141 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-@app.get("/")
+# HTML Viewer Code na direktang ise-serve ng Server
+HTML_CONTENT = """
+<!DOCTYPE html>
+<html lang="tl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Premote Cloud Remote Desktop</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #111;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+            outline: none;
+        }
+        h2 { margin-bottom: 5px; font-size: 1.2rem; color: #4CAF50; }
+        #controlsBar {
+            margin-bottom: 10px; background: #222; padding: 8px 15px;
+            border-radius: 5px; border: 1px solid #443; font-size: 0.9rem;
+            display: flex; gap: 15px; align-items: center;
+        }
+        input[type=range] { cursor: pointer; }
+        #streamContainer {
+            border: 2px solid #333; box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            max-width: 90%; max-height: 75vh; cursor: default;
+            background-color: #222; min-width: 320px; min-height: 200px;
+            display: flex; align-items: center; justify-content: center; user-select: none;
+        }
+        img { display: block; max-width: 100%; height: auto; user-drag: none; }
+        #status { margin-top: 10px; font-size: 0.9rem; color: #aaa; text-align: center; max-width: 80%; word-break: break-all; }
+    </style>
+</head>
+<body tabindex="0">
+    <h2>Premote Cloud Remote Desktop</h2>
+    <div id="controlsBar">
+        <label for="qualityRange">Stream Quality: <span id="qualityVal">40</span>%</label>
+        <input type="range" id="qualityRange" min="10" max="90" value="40">
+    </div>
+    <div id="streamContainer">
+        <img id="stream" alt="Naghihintay ng stream..." />
+    </div>
+    <div id="status">Status: Kumokonekta...</div>
+
+    <script>
+        const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+        const wsUrl = wsProtocol + window.location.host + "/ws";
+        const statusElement = document.getElementById("status");
+        const imgElement = document.getElementById("stream");
+        const qualityRange = document.getElementById("qualityRange");
+        const qualityVal = document.getElementById("qualityVal");
+
+        const password = prompt("I-enter ang Premote Server Password:");
+        if (!password) {
+            statusElement.innerText = "Error: Kailangan ang password.";
+            statusElement.style.color = "#f44336";
+            throw new Error("Cancelled");
+        }
+
+        let ws = new WebSocket(wsUrl);
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = () => {
+            statusElement.innerText = "Status: Authenticating...";
+            ws.send("auth:" + password);
+        };
+
+        ws.onmessage = (event) => {
+            if (typeof event.data === "string") {
+                if (event.data === "auth_success") {
+                    statusElement.innerText = "Status: Connected! Live na ang stream.";
+                    statusElement.style.color = "#4CAF50";
+                } else if (event.data === "auth_failed") {
+                    statusElement.innerText = "Status: Maling password!";
+                    statusElement.style.color = "#f44336";
+                    ws.close();
+                }
+            } else if (event.data instanceof ArrayBuffer) {
+                const blob = new Blob([event.data], { type: "image/jpeg" });
+                const imageUrl = URL.createObjectURL(blob);
+                imgElement.src = imageUrl;
+                imgElement.onload = () => { URL.revokeObjectURL(imageUrl); };
+            }
+        };
+
+        qualityRange.addEventListener("input", (e) => {
+            const q = e.target.value;
+            qualityVal.innerText = q;
+            if (ws.readyState === WebSocket.OPEN) ws.send(`quality:${q}`);
+        });
+
+        imgElement.addEventListener("mousemove", (event) => {
+            const rect = imgElement.getBoundingClientRect();
+            const x = (event.clientX - rect.left) / rect.width;
+            const y = (event.clientY - rect.top) / rect.height;
+            if (x >= 0 && x <= 1 && y >= 0 && y <= 1) {
+                if (ws.readyState === WebSocket.OPEN) ws.send(`move:${x}:${y}`);
+            }
+        });
+
+        imgElement.addEventListener("mousedown", (event) => {
+            if (ws.readyState === WebSocket.OPEN) {
+                if (event.button === 0) ws.send("down:left");
+                else if (event.button === 2) ws.send("down:right");
+            }
+        });
+
+        imgElement.addEventListener("mouseup", (event) => {
+            if (ws.readyState === WebSocket.OPEN) {
+                if (event.button === 0) ws.send("up:left");
+                else if (event.button === 2) ws.send("up:right");
+            }
+        });
+
+        imgElement.addEventListener("contextmenu", (e) => e.preventDefault());
+
+        window.addEventListener("keydown", (e) => {
+            if (ws.readyState === WebSocket.OPEN) { ws.send(`keydown:${e.key}`); e.preventDefault(); }
+        });
+        window.addEventListener("keyup", (e) => {
+            if (ws.readyState === WebSocket.OPEN) { ws.send(`keyup:${e.key}`); e.preventDefault(); }
+        });
+    </script>
+</body>
+</html>
+"""
+
+@app.get("/", response_class=HTMLResponse)
 def read_root():
-    return {"status": "Premote Secure Cloud Server ay buhay at gising!"}
+    return HTML_CONTENT
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -45,30 +175,23 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             message = await websocket.receive()
-            
             if message.get("text"):
                 text_data = message["text"]
-                
-                # Suriin kung ito ay password authentication request
                 if text_data.startswith("auth:"):
                     pwd = text_data.split(":", 1)[1]
                     if pwd == SECRET_PASSWORD:
                         manager.active_connections[websocket] = True
                         await websocket.send_text("auth_success")
-                        print("[+] Tagumpay! Na-verify ang password ng client.")
                     else:
                         await websocket.send_text("auth_failed")
-                        print("[-] Maling password ang ibinigay. Isasara ang koneksyon.")
                         await websocket.close()
                         break
                     continue
                 
-                # Kung authenticated na, ipasa ang command sa iba
                 if manager.active_connections.get(websocket, False):
                     await manager.broadcast_to_others(text_data, websocket, is_bytes=False)
                     
             elif message.get("bytes"):
-                # Kung authenticated na, ipasa ang video frame sa iba
                 if manager.active_connections.get(websocket, False):
                     await manager.broadcast_to_others(message["bytes"], websocket, is_bytes=True)
                     
@@ -76,4 +199,3 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
     except Exception as e:
         manager.disconnect(websocket)
-        print(f"[-] WebSocket Error: {e}")
