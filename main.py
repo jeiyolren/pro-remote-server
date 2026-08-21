@@ -1,7 +1,8 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from typing import Dict
-import time
+import os
+import urllib.parse
 
 app = FastAPI()
 
@@ -14,12 +15,10 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections[websocket] = False
-        print(f"[+] May kumonekta... Total clients: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             del self.active_connections[websocket]
-        print(f"[-] Nag-disconnect ang client. Total clients: {len(self.active_connections)}")
 
     async def broadcast_to_others(self, message, sender: WebSocket, is_bytes: bool):
         for connection, is_auth in self.active_connections.items():
@@ -30,7 +29,7 @@ class ConnectionManager:
                     else:
                         await connection.send_text(message)
                 except Exception as e:
-                    print(f"[-] Error sa pag-broadcast: {e}")
+                    print(f"[-] Error: {e}")
 
 manager = ConnectionManager()
 
@@ -40,37 +39,35 @@ HTML_CONTENT = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Premote Cloud Remote Desktop - Pro</title>
+    <title>Premote Cloud Remote Desktop - Pro + Files</title>
     <style>
         body {
-            margin: 0;
-            background-color: #111;
-            color: #fff;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            font-family: Arial, sans-serif;
-            outline: none;
-            overflow: hidden;
+            margin: 0; background-color: #111; color: #fff;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            height: 100vh; font-family: Arial, sans-serif; outline: none; overflow: hidden;
         }
         h2 { margin: 5px 0; font-size: 1.1rem; color: #4CAF50; }
         #controlsBar {
             margin-bottom: 8px; background: #222; padding: 6px 12px;
-            border-radius: 5px; border: 1px alt #443; font-size: 0.85rem;
+            border-radius: 5px; border: 1px solid #443; font-size: 0.85rem;
             display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center;
         }
         input[type=range], button { cursor: pointer; }
         input[type=text] { padding: 3px 6px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; font-size: 0.85rem; }
         button { background: #4CAF50; color: white; border: none; padding: 4px 10px; border-radius: 3px; font-weight: bold; font-size: 0.85rem; }
         button:hover { background: #45a049; }
+        #mainLayout { display: flex; gap: 10px; max-width: 95%; max-height: 72vh; align-items: flex-start; }
         #streamContainer {
             border: 2px solid #333; box-shadow: 0 0 20px rgba(0,0,0,0.8);
-            max-width: 95%; max-height: 72vh; cursor: default;
-            background-color: #222; min-width: 320px; min-height: 200px;
-            display: flex; align-items: center; justify-content: center; user-select: none;
+            cursor: default; background-color: #222; display: flex; align-items: center; justify-content: center; user-select: none;
         }
+        #filePanel {
+            background: #1a1a1a; border: 1px solid #333; border-radius: 5px; width: 220px; height: 100%; max-height: 70vh;
+            display: flex; flex-direction: column; padding: 8px; font-size: 0.8rem; overflow-y: auto;
+        }
+        #fileList { list-style: none; padding: 0; margin: 5px 0; overflow-y: auto; flex-grow: 1; }
+        #fileList li { padding: 4px; border-bottom: 1px solid #2a2a2a; cursor: pointer; word-break: break-all; }
+        #fileList li:hover { background: #333; }
         img { display: block; max-width: 100%; height: auto; user-drag: none; }
         #stats { font-size: 0.8rem; color: #888; margin-top: 5px; }
         #status { margin-top: 5px; font-size: 0.85rem; color: #aaa; text-align: center; }
@@ -84,16 +81,21 @@ HTML_CONTENT = """
             <input type="range" id="qualityRange" min="10" max="90" value="40" style="vertical-align: middle;">
         </div>
         <div>
-            <input type="text" id="clipboardText" placeholder="Clipboard text..." style="width: 160px;">
+            <input type="text" id="clipboardText" placeholder="Clipboard text..." style="width: 140px;">
             <button id="sendClipboardBtn">Send</button>
         </div>
-        <div>
-            <button id="fullscreenBtn">Full Screen</button>
-        </div>
+        <div><button id="fullscreenBtn">Full Screen</button></div>
     </div>
     
-    <div id="streamContainer">
-        <img id="stream" alt="Naghihintay ng stream..." />
+    <div id="mainLayout">
+        <div id="streamContainer">
+            <img id="stream" alt="Naghihintay ng stream..." />
+        </div>
+        <div id="filePanel">
+            <b>Remote Files (C:\\):</b>
+            <button id="loadFilesBtn" style="margin-top: 5px; font-size: 0.75rem;">Refresh Files</button>
+            <ul id="fileList"><li>I-click ang Refresh</li></ul>
+        </div>
     </div>
     
     <div id="stats">Ping: <span id="pingVal">0</span>ms | FPS: <span id="fpsVal">0</span></div>
@@ -109,6 +111,8 @@ HTML_CONTENT = """
         const clipboardText = document.getElementById("clipboardText");
         const sendClipboardBtn = document.getElementById("sendClipboardBtn");
         const fullscreenBtn = document.getElementById("fullscreenBtn");
+        const loadFilesBtn = document.getElementById("loadFilesBtn");
+        const fileList = document.getElementById("fileList");
         const pingVal = document.getElementById("pingVal");
         const fpsVal = document.getElementById("fpsVal");
 
@@ -121,17 +125,9 @@ HTML_CONTENT = """
 
         let ws = new WebSocket(wsUrl);
         ws.binaryType = "arraybuffer";
-
         let frameCount = 0;
-        let lastTime = performance.now();
 
-        // FPS Counter loop
-        setInterval(() => {
-            fpsVal.innerText = frameCount;
-            frameCount = 0;
-        }, 1000);
-
-        // Ping Heartbeat
+        setInterval(() => { fpsVal.innerText = frameCount; frameCount = 0; }, 1000);
         setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
                 window.pingStart = performance.now();
@@ -154,8 +150,21 @@ HTML_CONTENT = """
                     statusElement.style.color = "#f44336";
                     ws.close();
                 } else if (event.data === "pong") {
-                    const latency = Math.round(performance.now() - window.pingStart);
-                    pingVal.innerText = latency;
+                    pingVal.innerText = Math.round(performance.now() - window.pingStart);
+                } else if (event.data.startsWith("files_list:")) {
+                    const filesJson = event.data.substring(11);
+                    try {
+                        const files = JSON.parse(filesJson);
+                        fileList.innerHTML = "";
+                        files.forEach(f => {
+                            const li = document.createElement("li");
+                            li.innerText = f;
+                            li.onclick = () => {
+                                window.open(`/download?file=C:/${encodeURIComponent(f)}&pwd=${password}`, '_blank');
+                            };
+                            fileList.appendChild(li);
+                        });
+                    } catch(e) {}
                 }
             } else if (event.data instanceof ArrayBuffer) {
                 frameCount++;
@@ -167,28 +176,25 @@ HTML_CONTENT = """
         };
 
         qualityRange.addEventListener("input", (e) => {
-            const q = e.target.value;
-            qualityVal.innerText = q;
-            if (ws.readyState === WebSocket.OPEN) ws.send(`quality:${q}`);
+            qualityVal.innerText = e.target.value;
+            if (ws.readyState === WebSocket.OPEN) ws.send(`quality:${e.target.value}`);
         });
 
+        loadFilesBtn.onclick = () => {
+            if (ws.readyState === WebSocket.OPEN) ws.send("get_files");
+        };
+
         sendClipboardBtn.addEventListener("click", () => {
-            const text = clipboardText.value;
-            if (text && ws.readyState === WebSocket.OPEN) {
-                ws.send(`clipboard:${text}`);
+            if (clipboardText.value && ws.readyState === WebSocket.OPEN) {
+                ws.send(`clipboard:${clipboardText.value}`);
                 clipboardText.value = "";
-                alert("Naipadala na ang text sa clipboard!");
+                alert("Naipadala na ang clipboard text!");
             }
         });
 
         fullscreenBtn.addEventListener("click", () => {
-            if (!document.fullscreenElement) {
-                document.documentElement.requestFullscreen().catch(err => {
-                    alert(`Error sa pag-fullscreen: ${err.message}`);
-                });
-            } else {
-                document.exitFullscreen();
-            }
+            if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+            else document.exitFullscreen();
         });
 
         imgElement.addEventListener("mousemove", (event) => {
@@ -200,17 +206,17 @@ HTML_CONTENT = """
             }
         });
 
-        imgElement.addEventListener("mousedown", (event) => {
+        imgElement.addEventListener("mousedown", (e) => {
             if (ws.readyState === WebSocket.OPEN) {
-                if (event.button === 0) ws.send("down:left");
-                else if (event.button === 2) ws.send("down:right");
+                if (e.button === 0) ws.send("down:left");
+                else if (e.button === 2) ws.send("down:right");
             }
         });
 
-        imgElement.addEventListener("mouseup", (event) => {
+        imgElement.addEventListener("mouseup", (e) => {
             if (ws.readyState === WebSocket.OPEN) {
-                if (event.button === 0) ws.send("up:left");
-                else if (event.button === 2) ws.send("up:right");
+                if (e.button === 0) ws.send("up:left");
+                else if (e.button === 2) ws.send("up:right");
             }
         });
 
@@ -231,6 +237,14 @@ HTML_CONTENT = """
 def read_root():
     return HTML_CONTENT
 
+@app.get("/download")
+def download_file(file: str, pwd: str):
+    if pwd != SECRET_PASSWORD:
+        return {"error": "Unauthorized"}
+    if os.path.exists(file):
+        return FileResponse(file, filename=os.path.basename(file))
+    return {"error": "File not found"}
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
@@ -242,7 +256,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 if text_data == "ping":
                     await websocket.send_text("pong")
                     continue
-                
                 if text_data.startswith("auth:"):
                     pwd = text_data.split(":", 1)[1]
                     if pwd == SECRET_PASSWORD:
