@@ -17,15 +17,17 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
         print(f"[-] Nag-disconnect ang isang client. Total clients: {len(self.active_connections)}")
 
-    async def broadcast(self, message, is_bytes: bool):
+    async def broadcast_to_others(self, message, sender: WebSocket, is_bytes: bool):
+        # I-broadcast sa LAIBAN MALIBAN sa nagpadala (sender)
         for connection in self.active_connections:
-            try:
-                if is_bytes:
-                    await connection.send_bytes(message)
-                else:
-                    await connection.send_text(message)
-            except Exception as e:
-                print(f"[-] Error sa pag-broadcast: {e}")
+            if connection != sender:
+                try:
+                    if is_bytes:
+                        await connection.send_bytes(message)
+                    else:
+                        await connection.send_text(message)
+                except Exception as e:
+                    print(f"[-] Error sa pag-broadcast: {e}")
 
 manager = ConnectionManager()
 
@@ -39,10 +41,13 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             message = await websocket.receive()
+            
+            # Ipasa lamang sa ibang clients (Browser o C++ app)
             if message.get("bytes"):
-                await manager.broadcast(message["bytes"], is_bytes=True)
+                await manager.broadcast_to_others(message["bytes"], websocket, is_bytes=True)
             elif message.get("text"):
-                await manager.broadcast(message["text"], is_bytes=False)
+                await manager.broadcast_to_others(message["text"], websocket, is_bytes=False)
+                
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
