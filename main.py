@@ -38,16 +38,11 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Saluhin ang mensahe mula sa C++ app o Web Viewer
             message = await websocket.receive()
-            
-            if "bytes" in message and message["bytes"] is not None:
-                # Binary frame galing sa C++ screen streamer
+            if message.get("bytes"):
                 await manager.broadcast(message["bytes"], is_bytes=True)
-            elif "text" in message and message["text"] is not None:
-                # Text/Command galing sa web viewer (mouse move/click)
+            elif message.get("text"):
                 await manager.broadcast(message["text"], is_bytes=False)
-                
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
